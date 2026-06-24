@@ -56,6 +56,7 @@ function guessProvider(url) {
   if (host.includes('google-analytics')) return 'Google Analytics';
   if (host.includes('googletagmanager')) return 'Google Tag Manager';
   if (host.includes('doubleclick')) return 'Google DoubleClick';
+  if (host.includes('google.com')) return 'Google';
   if (host.includes('youtube') || host.includes('ytimg')) return 'YouTube';
   if (host.includes('cookieyes')) return 'CookieYes';
   if (host.includes('moneypenny')) return 'Moneypenny';
@@ -69,6 +70,44 @@ function guessProvider(url) {
   if (host.includes('clarity')) return 'Microsoft Clarity';
 
   return host || 'Unknown';
+}
+
+function getExpiryLabel(cookie) {
+  if (!cookie.expires || cookie.expires < 0) return 'Session';
+
+  const now = Date.now() / 1000;
+  const diff = cookie.expires - now;
+
+  if (diff <= 0) return 'Expired';
+
+  const days = Math.round(diff / 86400);
+
+  if (days < 1) return 'Less than 1 day';
+  if (days === 1) return '1 day';
+  if (days < 31) return `${days} days`;
+  if (days < 365) return `${Math.round(days / 30)} month`;
+  return `${Math.round(days / 365)} year`;
+}
+
+function getCookieDescription(cookie) {
+  const name = String(cookie.name || '').toLowerCase();
+  const domain = String(cookie.domain || '').toLowerCase();
+
+  if (name === '_ga') return 'Google Analytics cookie used to distinguish users.';
+  if (name.startsWith('_ga_')) return 'Google Analytics 4 cookie used to maintain session state.';
+  if (name === '_gid') return 'Google Analytics cookie used to distinguish users.';
+  if (name.startsWith('_gat')) return 'Google Analytics throttling cookie.';
+  if (name === '_gcl_au') return 'Google advertising conversion linker cookie.';
+  if (name === 'ide') return 'Google DoubleClick advertising cookie.';
+  if (name === 'test_cookie') return 'DoubleClick test cookie used to check whether the browser supports cookies.';
+  if (name === 'ysc') return 'YouTube cookie used to maintain and track video session activity.';
+  if (name === 'visitor_info1_live') return 'YouTube cookie used for video preferences and tracking.';
+  if (name === 'visitor_privacy_metadata') return 'YouTube cookie used to store privacy and consent metadata.';
+  if (name === 'cookieyes-consent') return 'CookieYes consent cookie used to store the visitor cookie preferences.';
+  if (name.includes('moneypenny')) return 'Moneypenny live chat cookie used for chat session or visitor state.';
+  if (domain.includes('yoshki')) return 'Yoshki / SRA badge resource. Cookie not always set; service should still be disclosed as a third-party embed.';
+
+  return '';
 }
 
 async function collectLinks(page, rootHost) {
@@ -223,6 +262,122 @@ async function launchBrowser() {
   });
 }
 
+function createNetworkTracker() {
+  const requestById = new Map();
+  const responseByUrl = new Map();
+  const requestCountByUrl = new Map();
+
+  function getInitiatorType(initiator) {
+    if (!initiator) return 'unknown';
+    if (initiator.type) return initiator.type;
+    return 'unknown';
+  }
+
+  function getInitiatorSource(initiator) {
+    if (!initiator) return '';
+
+    if (initiator.url) return initiator.url;
+
+    if (Array.isArray(initiator.stack?.callFrames)) {
+      const frame = initiator.stack.callFrames.find(f => f.url);
+      if (frame) return frame.url;
+    }
+
+    return '';
+  }
+
+  async function attach(page) {
+    const client = await page.context().newCDPSession(page);
+    await client.send('Network.enable');
+
+    client.on('Network.requestWillBeSent', event => {
+      const url = cleanUrl(event.request?.url);
+      if (!url) return;
+
+      requestById.set(event.requestId, {
+        requestId: event.requestId,
+        url,
+        method: event.request?.method || '',
+        initiator: getInitiatorType(event.initiator),
+        sourceUrl: getInitiatorSource(event.initiator),
+        timestamp: event.timestamp
+      });
+
+      requestCountByUrl.set(url, (requestCountByUrl.get(url) || 0) + 1);
+    });
+
+    client.on('Network.responseReceived', event => {
+      const request = requestById.get(event.requestId);
+      const response = event.response;
+      const url = cleanUrl(response?.url || request?.url);
+      if (!url) return;
+
+      responseByUrl.set(url, {
+        url,
+        status: response.status,
+        mimeType: response.mimeType || '',
+        remoteIPAddress: response.remoteIPAddress || '',
+        remotePort: response.remotePort || '',
+        protocol: response.protocol || '',
+        fromDiskCache: response.fromDiskCache || false,
+        fromServiceWorker: response.fromServiceWorker || false,
+        headers: response.headers || {},
+        initiator: request?.initiator || 'unknown',
+        sourceUrl: request?.sourceUrl || '',
+        method: request?.method || ''
+      });
+    });
+
+    return client;
+  }
+
+  function getMetaForUrl(url) {
+    const cleaned = cleanUrl(url);
+    if (!cleaned) return {};
+
+    const response = responseByUrl.get(cleaned) || {};
+
+    return {
+      initiator: response.initiator || 'unknown',
+      sourceUrl: response.sourceUrl || '',
+      serverIPAddress: response.remoteIPAddress || '',
+      mimeType: response.mimeType || '',
+      usedRequestCount: requestCountByUrl.get(cleaned) || 0,
+      networkStatus: response.status || '',
+      protocol: response.protocol || ''
+    };
+  }
+
+  function allRequests(rootHost) {
+    const rows = [];
+
+    for (const [url, response] of responseByUrl.entries()) {
+      rows.push({
+        type: 'network-request',
+        method: response.method || '',
+        url,
+        domain: getHost(url),
+        provider: guessProvider(url),
+        thirdParty: !sameSite(url, rootHost),
+        status: response.status || '',
+        mimeType: response.mimeType || '',
+        serverIPAddress: response.remoteIPAddress || '',
+        initiator: response.initiator || 'unknown',
+        sourceUrl: response.sourceUrl || '',
+        usedRequestCount: requestCountByUrl.get(url) || 0
+      });
+    }
+
+    return rows;
+  }
+
+  return {
+    attach,
+    getMetaForUrl,
+    allRequests
+  };
+}
+
 async function scanWebsite(options, onProgress = () => {}) {
   const startUrl = normaliseUrl(options.url);
   const maxPages = Math.max(1, Math.min(Number(options.maxPages || 1000), 10000));
@@ -233,44 +388,33 @@ async function scanWebsite(options, onProgress = () => {}) {
   const startedAt = new Date().toISOString();
 
   const browser = await launchBrowser();
-  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true
+  });
+
   const page = await context.newPage();
+  const networkTracker = createNetworkTracker();
+  await networkTracker.attach(page);
 
   const cookieMap = new Map();
   const resourceMap = new Map();
-  const networkMap = new Map();
 
   const pages = [];
   const errors = [];
   const queue = [startUrl];
   const seen = new Set();
 
-  page.on('request', request => {
-    try {
-      const cleaned = cleanUrl(request.url());
-      if (!cleaned) return;
-
-      const item = {
-        type: 'network-request',
-        method: request.method(),
-        url: cleaned,
-        domain: getHost(cleaned),
-        provider: guessProvider(cleaned),
-        thirdParty: !sameSite(cleaned, rootHost)
-      };
-
-      networkMap.set(`${item.method}|${item.url}`, item);
-    } catch {}
-  });
-
   try {
     const sitemapUrls = await collectSitemapUrls(context.request, startUrl, rootHost, maxPages);
+
     for (const u of sitemapUrls) {
       if (!queue.includes(u)) queue.push(u);
     }
 
     while (queue.length && pages.length < maxPages) {
       const currentUrl = queue.shift();
+
       if (!currentUrl || seen.has(currentUrl)) continue;
 
       seen.add(currentUrl);
@@ -307,12 +451,26 @@ async function scanWebsite(options, onProgress = () => {}) {
 
         for (const cookie of cookies) {
           const classified = classifyCookie(cookie);
+          const cookieDomainUrl = `https://${cookie.domain.replace(/^\./, '')}`;
+
+          const bestNetworkMeta =
+            networkTracker.getMetaForUrl(cookieDomainUrl) ||
+            {};
 
           const enriched = {
             ...cookie,
             ...classified,
+            provider: guessProvider(cookieDomainUrl),
+            description: getCookieDescription(cookie),
+            expiryLabel: getExpiryLabel(cookie),
             detectedOn: currentUrl,
-            firstParty: sameSite(`https://${cookie.domain.replace(/^\./, '')}`, rootHost)
+            firstFound: currentUrl,
+            firstParty: sameSite(cookieDomainUrl, rootHost),
+            initiator: bestNetworkMeta.initiator || 'unknown',
+            sourceUrl: bestNetworkMeta.sourceUrl || '',
+            serverIPAddress: bestNetworkMeta.serverIPAddress || '',
+            mimeType: bestNetworkMeta.mimeType || '',
+            usedRequestCount: bestNetworkMeta.usedRequestCount || 0
           };
 
           const key = cookieKey(cookie);
@@ -336,11 +494,24 @@ async function scanWebsite(options, onProgress = () => {}) {
         let thirdPartyResourcesFound = 0;
 
         for (const item of pageResources) {
-          const key = resourceKey(item);
+          const meta = networkTracker.getMetaForUrl(item.url);
+
+          const enrichedResource = {
+            ...item,
+            initiator: meta.initiator || 'unknown',
+            sourceUrl: meta.sourceUrl || '',
+            serverIPAddress: meta.serverIPAddress || '',
+            mimeType: meta.mimeType || '',
+            usedRequestCount: meta.usedRequestCount || 0,
+            networkStatus: meta.networkStatus || '',
+            protocol: meta.protocol || ''
+          };
+
+          const key = resourceKey(enrichedResource);
 
           if (!resourceMap.has(key)) {
             resourceMap.set(key, {
-              ...item,
+              ...enrichedResource,
               pagesDetected: [currentUrl]
             });
           } else {
@@ -363,9 +534,8 @@ async function scanWebsite(options, onProgress = () => {}) {
           }
         }
 
-        const thirdPartyNetworkRequestsFound = [...networkMap.values()].filter(
-          r => r.thirdParty
-        ).length;
+        const networkRequests = networkTracker.allRequests(rootHost);
+        const thirdPartyNetworkRequestsFound = networkRequests.filter(r => r.thirdParty).length;
 
         pageRecord.status = response ? response.status() : 'loaded';
         pageRecord.cookiesFound = pageCookieCount;
@@ -392,7 +562,7 @@ async function scanWebsite(options, onProgress = () => {}) {
     String(a.domain).localeCompare(String(b.domain))
   );
 
-  const networkRequests = [...networkMap.values()].sort((a, b) =>
+  const networkRequests = networkTracker.allRequests(rootHost).sort((a, b) =>
     String(a.domain).localeCompare(String(b.domain))
   );
 
@@ -420,6 +590,7 @@ async function scanWebsite(options, onProgress = () => {}) {
         scriptsFound: 0,
         iframesFound: 0,
         imagesFound: 0,
+        linksFound: 0,
         networkRequestsFound: 0,
         pagesDetected: []
       });
@@ -451,6 +622,7 @@ async function scanWebsite(options, onProgress = () => {}) {
     if (resource.type === 'scripts') service.scriptsFound += 1;
     if (resource.type === 'iframes') service.iframesFound += 1;
     if (resource.type === 'images') service.imagesFound += 1;
+    if (resource.type === 'links') service.linksFound += 1;
 
     for (const p of resource.pagesDetected || []) {
       if (!service.pagesDetected.includes(p)) service.pagesDetected.push(p);
