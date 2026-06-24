@@ -12,10 +12,10 @@
     "build:linux": "electron-builder --linux AppImage"
   },
   "dependencies": {
-    "@playwright/test": "^1.48.2",
-    "electron": "^33.2.1"
+    "@playwright/test": "^1.48.2"
   },
   "devDependencies": {
+    "electron": "^33.2.1",
     "electron-builder": "^25.1.8"
   },
   "build": {
@@ -25,15 +25,14 @@
       "src/**/*",
       "package.json"
     ],
-    "extraResources": [
-      {
-        "from": "node_modules/playwright-core/.local-browsers",
-        "to": "playwright-browsers",
-        "filter": ["**/*"]
-      }
-    ],
     "directories": {
       "output": "dist"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
     }
   }
 }
