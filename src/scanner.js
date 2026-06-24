@@ -50,8 +50,14 @@ function isAssetUrl(url) {
   }
 }
 
-function guessProvider(url) {
+function guessProvider(url, rootHost = '') {
   const host = getHost(url);
+
+  if (!host) return 'Unknown';
+
+  if (rootHost && (host === rootHost || host.endsWith(`.${rootHost}`))) {
+    return 'Website owner';
+  }
 
   if (host.includes('google-analytics')) return 'Google Analytics';
   if (host.includes('googletagmanager')) return 'Google Tag Manager';
@@ -69,7 +75,7 @@ function guessProvider(url) {
   if (host.includes('hotjar')) return 'Hotjar';
   if (host.includes('clarity')) return 'Microsoft Clarity';
 
-  return host || 'Unknown';
+  return host;
 }
 
 function getExpiryLabel(cookie) {
@@ -98,13 +104,20 @@ function getCookieDescription(cookie) {
   if (name === '_gid') return 'Google Analytics cookie used to distinguish users.';
   if (name.startsWith('_gat')) return 'Google Analytics throttling cookie.';
   if (name === '_gcl_au') return 'Google advertising conversion linker cookie.';
+  if (name === '_fbp') return 'Meta/Facebook browser identifier used for advertising and conversion tracking.';
   if (name === 'ide') return 'Google DoubleClick advertising cookie.';
   if (name === 'test_cookie') return 'DoubleClick test cookie used to check whether the browser supports cookies.';
   if (name === 'ysc') return 'YouTube cookie used to maintain and track video session activity.';
   if (name === 'visitor_info1_live') return 'YouTube cookie used for video preferences and tracking.';
   if (name === 'visitor_privacy_metadata') return 'YouTube cookie used to store privacy and consent metadata.';
-  if (name === 'cookieyes-consent') return 'CookieYes consent cookie used to store the visitor cookie preferences.';
+  if (name === '__secure-rollout_token') return 'YouTube feature rollout cookie used by embedded YouTube services.';
+  if (name === '__secure-ynid') return 'YouTube advertising or tracking cookie used by embedded YouTube services.';
+  if (name === 'cookieyes-consent') return 'CookieYes consent cookie used to store visitor cookie preferences.';
   if (name.includes('moneypenny')) return 'Moneypenny live chat cookie used for chat session or visitor state.';
+  if (name.includes('xsrf') || name.includes('csrf')) return 'Security cookie used to help protect against cross-site request forgery.';
+  if (name.includes('session')) return 'Session cookie used to maintain website session state.';
+  if (name.includes('requestverificationtoken')) return 'Security verification token used by the website.';
+  if (name.includes('applicationgatewayaffinity')) return 'Azure Application Gateway affinity cookie used for load balancing.';
   if (domain.includes('yoshki')) return 'Yoshki / SRA badge resource. Cookie not always set; service should still be disclosed as a third-party embed.';
 
   return '';
@@ -129,14 +142,12 @@ async function collectLinks(page, rootHost) {
 }
 
 async function collectPageResources(page, currentUrl, rootHost) {
-  const data = await page.evaluate(() => {
-    return {
-      scripts: Array.from(document.querySelectorAll('script[src]')).map(el => el.src),
-      iframes: Array.from(document.querySelectorAll('iframe[src]')).map(el => el.src),
-      images: Array.from(document.querySelectorAll('img[src]')).map(el => el.src),
-      links: Array.from(document.querySelectorAll('link[href]')).map(el => el.href)
-    };
-  }).catch(() => ({
+  const data = await page.evaluate(() => ({
+    scripts: Array.from(document.querySelectorAll('script[src]')).map(el => el.src),
+    iframes: Array.from(document.querySelectorAll('iframe[src]')).map(el => el.src),
+    images: Array.from(document.querySelectorAll('img[src]')).map(el => el.src),
+    links: Array.from(document.querySelectorAll('link[href]')).map(el => el.href)
+  })).catch(() => ({
     scripts: [],
     iframes: [],
     images: [],
@@ -154,7 +165,7 @@ async function collectPageResources(page, currentUrl, rootHost) {
         type,
         url: cleaned,
         domain: getHost(cleaned),
-        provider: guessProvider(cleaned),
+        provider: guessProvider(cleaned, rootHost),
         thirdParty: !sameSite(cleaned, rootHost),
         detectedOn: currentUrl
       });
@@ -262,20 +273,18 @@ async function launchBrowser() {
   });
 }
 
-function createNetworkTracker() {
+function createNetworkTracker(rootHost) {
   const requestById = new Map();
   const responseByUrl = new Map();
   const requestCountByUrl = new Map();
 
   function getInitiatorType(initiator) {
     if (!initiator) return 'unknown';
-    if (initiator.type) return initiator.type;
-    return 'unknown';
+    return initiator.type || 'unknown';
   }
 
   function getInitiatorSource(initiator) {
     if (!initiator) return '';
-
     if (initiator.url) return initiator.url;
 
     if (Array.isArray(initiator.stack?.callFrames)) {
@@ -348,7 +357,29 @@ function createNetworkTracker() {
     };
   }
 
-  function allRequests(rootHost) {
+  function getBestMetaForCookie(cookieDomainUrl) {
+    const cookieHost = getHost(cookieDomainUrl);
+    const matches = [...responseByUrl.values()].filter(r => {
+      const host = getHost(r.url);
+      return host === cookieHost || host.endsWith(`.${cookieHost}`);
+    });
+
+    if (!matches.length) return {};
+
+    const best = matches.find(r => r.mimeType && r.mimeType.includes('javascript')) || matches[0];
+
+    return {
+      initiator: best.initiator || 'unknown',
+      sourceUrl: best.sourceUrl || best.url || '',
+      serverIPAddress: best.remoteIPAddress || '',
+      mimeType: best.mimeType || '',
+      usedRequestCount: requestCountByUrl.get(best.url) || 0,
+      networkStatus: best.status || '',
+      protocol: best.protocol || ''
+    };
+  }
+
+  function allRequests() {
     const rows = [];
 
     for (const [url, response] of responseByUrl.entries()) {
@@ -357,7 +388,7 @@ function createNetworkTracker() {
         method: response.method || '',
         url,
         domain: getHost(url),
-        provider: guessProvider(url),
+        provider: guessProvider(url, rootHost),
         thirdParty: !sameSite(url, rootHost),
         status: response.status || '',
         mimeType: response.mimeType || '',
@@ -374,6 +405,7 @@ function createNetworkTracker() {
   return {
     attach,
     getMetaForUrl,
+    getBestMetaForCookie,
     allRequests
   };
 }
@@ -394,7 +426,7 @@ async function scanWebsite(options, onProgress = () => {}) {
   });
 
   const page = await context.newPage();
-  const networkTracker = createNetworkTracker();
+  const networkTracker = createNetworkTracker(rootHost);
   await networkTracker.attach(page);
 
   const cookieMap = new Map();
@@ -414,7 +446,6 @@ async function scanWebsite(options, onProgress = () => {}) {
 
     while (queue.length && pages.length < maxPages) {
       const currentUrl = queue.shift();
-
       if (!currentUrl || seen.has(currentUrl)) continue;
 
       seen.add(currentUrl);
@@ -452,15 +483,12 @@ async function scanWebsite(options, onProgress = () => {}) {
         for (const cookie of cookies) {
           const classified = classifyCookie(cookie);
           const cookieDomainUrl = `https://${cookie.domain.replace(/^\./, '')}`;
-
-          const bestNetworkMeta =
-            networkTracker.getMetaForUrl(cookieDomainUrl) ||
-            {};
+          const bestNetworkMeta = networkTracker.getBestMetaForCookie(cookieDomainUrl);
 
           const enriched = {
             ...cookie,
             ...classified,
-            provider: guessProvider(cookieDomainUrl),
+            provider: guessProvider(cookieDomainUrl, rootHost),
             description: getCookieDescription(cookie),
             expiryLabel: getExpiryLabel(cookie),
             detectedOn: currentUrl,
@@ -485,6 +513,14 @@ async function scanWebsite(options, onProgress = () => {}) {
             if (!existing.pagesDetected.includes(currentUrl)) {
               existing.pagesDetected.push(currentUrl);
             }
+
+            if (!existing.description && enriched.description) existing.description = enriched.description;
+            if (!existing.sourceUrl && enriched.sourceUrl) existing.sourceUrl = enriched.sourceUrl;
+            if (!existing.serverIPAddress && enriched.serverIPAddress) existing.serverIPAddress = enriched.serverIPAddress;
+            if (!existing.mimeType && enriched.mimeType) existing.mimeType = enriched.mimeType;
+            if ((!existing.usedRequestCount || existing.usedRequestCount === 0) && enriched.usedRequestCount) {
+              existing.usedRequestCount = enriched.usedRequestCount;
+            }
           }
 
           pageCookieCount++;
@@ -498,6 +534,7 @@ async function scanWebsite(options, onProgress = () => {}) {
 
           const enrichedResource = {
             ...item,
+            provider: guessProvider(item.url, rootHost),
             initiator: meta.initiator || 'unknown',
             sourceUrl: meta.sourceUrl || '',
             serverIPAddress: meta.serverIPAddress || '',
@@ -534,7 +571,7 @@ async function scanWebsite(options, onProgress = () => {}) {
           }
         }
 
-        const networkRequests = networkTracker.allRequests(rootHost);
+        const networkRequests = networkTracker.allRequests();
         const thirdPartyNetworkRequestsFound = networkRequests.filter(r => r.thirdParty).length;
 
         pageRecord.status = response ? response.status() : 'loaded';
@@ -562,7 +599,7 @@ async function scanWebsite(options, onProgress = () => {}) {
     String(a.domain).localeCompare(String(b.domain))
   );
 
-  const networkRequests = networkTracker.allRequests(rootHost).sort((a, b) =>
+  const networkRequests = networkTracker.allRequests().sort((a, b) =>
     String(a.domain).localeCompare(String(b.domain))
   );
 
@@ -580,7 +617,7 @@ async function scanWebsite(options, onProgress = () => {}) {
   const thirdPartyServicesMap = new Map();
 
   for (const domain of thirdPartyDomains) {
-    const provider = guessProvider(`https://${domain}`);
+    const provider = guessProvider(`https://${domain}`, rootHost);
 
     if (!thirdPartyServicesMap.has(provider)) {
       thirdPartyServicesMap.set(provider, {
@@ -603,7 +640,7 @@ async function scanWebsite(options, onProgress = () => {}) {
   for (const cookie of cookies) {
     if (!cookie.firstParty) {
       const domain = cookie.domain.replace(/^\./, '');
-      const provider = guessProvider(`https://${domain}`);
+      const provider = guessProvider(`https://${domain}`, rootHost);
       const service = thirdPartyServicesMap.get(provider);
 
       if (service) {
@@ -635,7 +672,7 @@ async function scanWebsite(options, onProgress = () => {}) {
   }
 
   const categoryCounts = cookies.reduce((acc, c) => {
-    const category = c.category || 'unknown';
+    const category = c.category || 'Unknown';
     acc[category] = (acc[category] || 0) + 1;
     return acc;
   }, {});
