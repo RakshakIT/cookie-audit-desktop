@@ -33,81 +33,133 @@ function cookieKey(cookie) {
   return `${cookie.name}|${cookie.domain}|${cookie.path}`;
 }
 
-async function collectLinks(page, baseUrl, rootHost) {
-  const hrefs = await page.$$eval('a[href]', links => links.map(a => a.href).filter(Boolean)).catch(() => []);
+async function collectLinks(page, rootHost) {
+  const hrefs = await page
+    .$$eval('a[href]', links => links.map(a => a.href).filter(Boolean))
+    .catch(() => []);
+
   const links = [];
+
   for (const href of hrefs) {
     const cleaned = cleanUrl(href);
     if (!cleaned) continue;
     if (!sameSite(cleaned, rootHost)) continue;
-    if (/\.(pdf|jpg|jpeg|png|gif|webp|svg|zip|docx?|xlsx?|pptx?|mp4|mp3)$/i.test(new URL(cleaned).pathname)) continue;
+
+    const pathname = new URL(cleaned).pathname;
+
+    if (/\.(pdf|jpg|jpeg|png|gif|webp|svg|zip|docx?|xlsx?|pptx?|mp4|mp3)$/i.test(pathname)) {
+      continue;
+    }
+
     links.push(cleaned);
   }
+
   return [...new Set(links)];
 }
 
 async function collectSitemapUrls(request, rootUrl, rootHost, maxPages) {
-  const sitemapUrl = new URL('/sitemap.xml', rootUrl).toString();
-  try {
-    const response = await request.get(sitemapUrl, { timeout: 10000 });
-    if (!response.ok()) return [];
-    const xml = await response.text();
-    const locs = [...xml.matchAll(/<loc>(.*?)<\/loc>/gi)].map(m => m[1].trim());
-    const urls = [];
-    for (const loc of locs) {
-      const cleaned = cleanUrl(loc);
-      if (!cleaned) continue;
-      if (!sameSite(cleaned, rootHost)) continue;
-      if (cleaned.endsWith('.xml')) {
-        try {
-          const sub = await request.get(cleaned, { timeout: 10000 });
-          if (sub.ok()) {
-            const subXml = await sub.text();
-            for (const sm of [...subXml.matchAll(/<loc>(.*?)<\/loc>/gi)]) {
-              const subUrl = cleanUrl(sm[1].trim());
-              if (subUrl && sameSite(subUrl, rootHost)) urls.push(subUrl);
-              if (urls.length >= maxPages) break;
-            }
-          }
-        } catch {}
-      } else {
-        urls.push(cleaned);
+  const sitemapCandidates = [
+    new URL('/sitemap.xml', rootUrl).toString(),
+    new URL('/sitemap_index.xml', rootUrl).toString()
+  ];
+
+  const urls = [];
+
+  async function readSitemap(sitemapUrl) {
+    try {
+      const response = await request.get(sitemapUrl, { timeout: 10000 });
+      if (!response.ok()) return;
+
+      const xml = await response.text();
+      const locs = [...xml.matchAll(/<loc>(.*?)<\/loc>/gi)].map(m =>
+        m[1].trim().replace(/&amp;/g, '&')
+      );
+
+      for (const loc of locs) {
+        const cleaned = cleanUrl(loc);
+        if (!cleaned) continue;
+        if (!sameSite(cleaned, rootHost)) continue;
+
+        if (cleaned.endsWith('.xml')) {
+          await readSitemap(cleaned);
+        } else {
+          urls.push(cleaned);
+        }
+
+        if (urls.length >= maxPages) return;
       }
-      if (urls.length >= maxPages) break;
+    } catch {
+      return;
     }
-    return [...new Set(urls)].slice(0, maxPages);
-  } catch {
-    return [];
   }
+
+  for (const sitemap of sitemapCandidates) {
+    await readSitemap(sitemap);
+    if (urls.length >= maxPages) break;
+  }
+
+  return [...new Set(urls)].slice(0, maxPages);
 }
 
 async function handleConsent(page, mode) {
   if (mode === 'none') return;
-  const acceptPatterns = ['accept all', 'accept', 'agree', 'allow all', 'ok'];
-  const rejectPatterns = ['reject all', 'reject', 'decline', 'deny', 'necessary only'];
+
+  const acceptPatterns = [
+    'accept all',
+    'accept',
+    'agree',
+    'allow all',
+    'ok',
+    'got it'
+  ];
+
+  const rejectPatterns = [
+    'reject all',
+    'reject',
+    'decline',
+    'deny',
+    'necessary only'
+  ];
+
   const patterns = mode === 'accept' ? acceptPatterns : rejectPatterns;
+
   for (const text of patterns) {
     try {
       const button = page.getByRole('button', { name: new RegExp(text, 'i') }).first();
+
       if (await button.count()) {
         await button.click({ timeout: 1500 });
         await page.waitForTimeout(1000);
         return;
       }
-    } catch {}
+    } catch {
+      // Ignore failed consent attempts.
+    }
   }
+}
+
+async function launchBrowser() {
+  return chromium.launch({
+    channel: 'chrome',
+    headless: true
+  });
 }
 
 async function scanWebsite(options, onProgress = () => {}) {
   const startUrl = normaliseUrl(options.url);
   const maxPages = Math.max(1, Math.min(Number(options.maxPages || 100), 1000));
   const consentMode = options.consentMode || 'none';
+
   const root = new URL(startUrl);
   const rootHost = root.hostname.replace(/^www\./, '');
   const startedAt = new Date().toISOString();
 
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const browser = await launchBrowser();
+
+  const context = await browser.newContext({
+    ignoreHTTPSErrors: true
+  });
+
   const page = await context.newPage();
 
   const cookieMap = new Map();
@@ -117,37 +169,90 @@ async function scanWebsite(options, onProgress = () => {}) {
   const seen = new Set();
 
   try {
-    const sitemapUrls = await collectSitemapUrls(context.request, startUrl, rootHost, maxPages);
-    for (const u of sitemapUrls) if (!queue.includes(u)) queue.push(u);
+    const sitemapUrls = await collectSitemapUrls(
+      context.request,
+      startUrl,
+      rootHost,
+      maxPages
+    );
+
+    for (const u of sitemapUrls) {
+      if (!queue.includes(u)) queue.push(u);
+    }
 
     while (queue.length && pages.length < maxPages) {
       const currentUrl = queue.shift();
+
       if (!currentUrl || seen.has(currentUrl)) continue;
+
       seen.add(currentUrl);
 
-      onProgress({ status: 'scanning', currentUrl, scanned: pages.length, queued: queue.length });
+      onProgress({
+        status: 'scanning',
+        currentUrl,
+        scanned: pages.length,
+        queued: queue.length
+      });
 
-      const pageRecord = { url: currentUrl, status: 'pending', cookiesFound: 0, newLinksFound: 0 };
+      const pageRecord = {
+        url: currentUrl,
+        status: 'pending',
+        cookiesFound: 0,
+        newLinksFound: 0
+      };
+
       try {
-        const response = await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const response = await page.goto(currentUrl, {
+          waitUntil: 'domcontentloaded',
+          timeout: 30000
+        });
+
         await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
         await handleConsent(page, consentMode);
         await page.waitForTimeout(1200);
 
         const cookies = await context.cookies();
         let pageCookieCount = 0;
+
         for (const cookie of cookies) {
           const classified = classifyCookie(cookie);
-          const enriched = { ...cookie, ...classified, detectedOn: currentUrl, firstParty: sameSite(`https://${cookie.domain.replace(/^\./, '')}`, rootHost) };
+
+          const enriched = {
+            ...cookie,
+            ...classified,
+            detectedOn: currentUrl,
+            firstParty: sameSite(
+              `https://${cookie.domain.replace(/^\./, '')}`,
+              rootHost
+            )
+          };
+
           const key = cookieKey(cookie);
-          if (!cookieMap.has(key)) cookieMap.set(key, enriched);
+
+          if (!cookieMap.has(key)) {
+            cookieMap.set(key, {
+              ...enriched,
+              pagesDetected: [currentUrl]
+            });
+          } else {
+            const existing = cookieMap.get(key);
+            if (!existing.pagesDetected.includes(currentUrl)) {
+              existing.pagesDetected.push(currentUrl);
+            }
+          }
+
           pageCookieCount++;
         }
 
-        const newLinks = await collectLinks(page, currentUrl, rootHost);
+        const newLinks = await collectLinks(page, rootHost);
         let added = 0;
+
         for (const link of newLinks) {
-          if (!seen.has(link) && !queue.includes(link) && pages.length + queue.length < maxPages * 3) {
+          if (
+            !seen.has(link) &&
+            !queue.includes(link) &&
+            pages.length + queue.length < maxPages * 3
+          ) {
             queue.push(link);
             added++;
           }
@@ -159,17 +264,25 @@ async function scanWebsite(options, onProgress = () => {}) {
       } catch (error) {
         pageRecord.status = 'error';
         pageRecord.error = error.message;
-        errors.push({ url: currentUrl, error: error.message });
+        errors.push({
+          url: currentUrl,
+          error: error.message
+        });
       }
+
       pages.push(pageRecord);
     }
   } finally {
     await browser.close();
   }
 
-  const cookies = [...cookieMap.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  const cookies = [...cookieMap.values()].sort((a, b) =>
+    String(a.name).localeCompare(String(b.name))
+  );
+
   const categoryCounts = cookies.reduce((acc, c) => {
-    acc[c.category] = (acc[c.category] || 0) + 1;
+    const category = c.category || 'unknown';
+    acc[category] = (acc[category] || 0) + 1;
     return acc;
   }, {});
 
