@@ -6,6 +6,7 @@
   <title>Cookie Audit Scanner</title>
   <link rel="stylesheet" href="renderer.css" />
 </head>
+
 <body>
   <main class="app">
     <header>
@@ -20,10 +21,12 @@
         Website URL
         <input id="url" placeholder="Enter website URL, e.g. https://example.com" />
       </label>
+
       <label>
         Max pages
-        <input id="maxPages" type="number" min="1" max="1000" value="100" />
+        <input id="maxPages" type="number" min="1" max="10000" value="1000" />
       </label>
+
       <label>
         Consent mode
         <select id="consentMode">
@@ -32,33 +35,15 @@
           <option value="reject">Reject</option>
         </select>
       </label>
-      <button id="scanBtn">Run full-site scan</button>
+
+      <button id="runScan">Run full-site scan</button>
     </section>
 
     <section class="status" id="status">Ready.</section>
 
-    <section class="cards" id="summaryCards"></section>
-
-    <section class="panel actions hidden" id="actions">
-      <button id="jsonBtn">Export JSON</button>
-      <button id="csvBtn">Export CSV</button>
-    </section>
-
-    <section class="panel hidden" id="categoryPanel">
-      <h2>Categories</h2>
-      <div class="category-grid" id="categories"></div>
-    </section>
-
-    <section class="panel hidden" id="pagesPanel">
-      <h2>Pages scanned</h2>
-      <div class="table-wrap"><table id="pagesTable"></table></div>
-    </section>
-
-    <section class="panel hidden" id="cookiesPanel">
-      <h2>Cookies</h2>
-      <div class="table-wrap"><table id="cookiesTable"></table></div>
-    </section>
+    <div id="output"></div>
   </main>
+
   <script src="renderer.js"></script>
 </body>
 </html>
