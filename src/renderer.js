@@ -13,6 +13,7 @@ function esc(value) {
 }
 
 function getApi() {
+  if (window.cookieScanner?.startScan) return window.cookieScanner.startScan;
   if (window.api?.startScan) return window.api.startScan;
   if (window.electronAPI?.startScan) return window.electronAPI.startScan;
   if (window.cookieAudit?.startScan) return window.cookieAudit.startScan;
@@ -20,27 +21,35 @@ function getApi() {
   return null;
 }
 
+function setStatus(message) {
+  const status = $('status');
+  if (status) status.textContent = message;
+}
+
 function renderSummary(report) {
   const categories = report.categoryCounts || {};
+
   return `
     <section class="panel">
       <h2>Summary</h2>
       <div class="cards">
-        <div class="card"><div class="value">${report.scannedPageCount || 0}</div><div class="label">Pages scanned</div></div>
-        <div class="card"><div class="value">${report.cookieCount || 0}</div><div class="label">Cookies found</div></div>
-        <div class="card"><div class="value">${(report.thirdPartyServices || []).length}</div><div class="label">Third-party services</div></div>
-        <div class="card"><div class="value">${(report.thirdPartyDomains || []).length}</div><div class="label">Third-party domains</div></div>
+        <div class="card"><div class="value">${esc(report.scannedPageCount || 0)}</div><div class="label">Pages scanned</div></div>
+        <div class="card"><div class="value">${esc(report.cookieCount || 0)}</div><div class="label">Cookies found</div></div>
+        <div class="card"><div class="value">${esc((report.thirdPartyServices || []).length)}</div><div class="label">Third-party services</div></div>
+        <div class="card"><div class="value">${esc((report.thirdPartyDomains || []).length)}</div><div class="label">Third-party domains</div></div>
       </div>
 
       <h3>Cookie categories</h3>
       <div class="category-grid">
-        ${Object.entries(categories).map(([k, v]) => `
+        ${Object.entries(categories).map(([category, count]) => `
           <div class="category">
-            <strong>${esc(k)}</strong>
-            <span>${v}</span>
+            <strong>${esc(category)}</strong>
+            <span>${esc(count)}</span>
           </div>
         `).join('')}
       </div>
+
+      <p class="muted">${esc(report.auditLimits?.note || '')}</p>
     </section>
   `;
 }
@@ -98,8 +107,9 @@ function renderCookies(report) {
               <th>Confidence</th>
               <th>Expiry</th>
               <th>First found</th>
+              <th>Pages found</th>
               <th>Initiator</th>
-              <th>Source</th>
+              <th>Source URL</th>
               <th>Server IP</th>
               <th>MIME</th>
               <th>Used requests</th>
@@ -119,6 +129,7 @@ function renderCookies(report) {
                 <td>${esc(c.confidence)}</td>
                 <td>${esc(c.expiryLabel || c.expires)}</td>
                 <td>${esc(c.firstFound || c.detectedOn)}</td>
+                <td>${esc((c.pagesDetected || []).length)}</td>
                 <td>${esc(c.initiator)}</td>
                 <td>${esc(c.sourceUrl)}</td>
                 <td>${esc(c.serverIPAddress)}</td>
@@ -153,6 +164,7 @@ function renderThirdPartyServices(report) {
               <th>Scripts</th>
               <th>Iframes</th>
               <th>Images</th>
+              <th>Links</th>
               <th>Network requests</th>
               <th>Pages detected</th>
             </tr>
@@ -166,8 +178,9 @@ function renderThirdPartyServices(report) {
                 <td>${esc(s.scriptsFound || 0)}</td>
                 <td>${esc(s.iframesFound || 0)}</td>
                 <td>${esc(s.imagesFound || 0)}</td>
+                <td>${esc(s.linksFound || 0)}</td>
                 <td>${esc(s.networkRequestsFound || 0)}</td>
-                <td>${esc((s.pagesDetected || []).slice(0, 5).join(', '))}</td>
+                <td>${esc((s.pagesDetected || []).length)}</td>
               </tr>
             `).join('')}
           </tbody>
@@ -195,6 +208,7 @@ function renderResources(title, rows) {
               <th>Server IP</th>
               <th>MIME</th>
               <th>Status</th>
+              <th>Used requests</th>
               <th>Detected on</th>
             </tr>
           </thead>
@@ -211,6 +225,7 @@ function renderResources(title, rows) {
                 <td>${esc(r.serverIPAddress)}</td>
                 <td>${esc(r.mimeType)}</td>
                 <td>${esc(r.networkStatus || r.status)}</td>
+                <td>${esc(r.usedRequestCount)}</td>
                 <td>${esc(r.detectedOn)}</td>
               </tr>
             `).join('')}
@@ -282,11 +297,6 @@ function renderReport(report) {
   `;
 }
 
-function setStatus(message) {
-  const status = $('status');
-  if (status) status.textContent = message;
-}
-
 async function startScan() {
   const url = $('url')?.value?.trim();
   const maxPages = $('maxPages')?.value || 1000;
@@ -316,7 +326,11 @@ async function startScan() {
     });
 
     latestReport = report;
-    setStatus(`Scan complete. ${report.scannedPageCount || 0} pages scanned, ${report.cookieCount || 0} cookies found.`);
+
+    setStatus(
+      `Scan complete. ${report.scannedPageCount || 0} pages scanned, ${report.cookieCount || 0} cookies found, ${(report.thirdPartyServices || []).length} third-party services detected.`
+    );
+
     renderReport(report);
   } catch (error) {
     console.error(error);
@@ -335,18 +349,33 @@ document.addEventListener('DOMContentLoaded', () => {
     runButton.addEventListener('click', startScan);
   }
 
-  const urlInput = $('url');
-  if (urlInput && urlInput.value.includes('langleywellington')) {
-    urlInput.value = '';
+  if (window.cookieScanner?.onProgress) {
+    window.cookieScanner.onProgress(progress => {
+      setStatus(
+        `Scanning: ${progress.scanned || 0} pages done, ${progress.queued || 0} queued — ${progress.currentUrl || ''}`
+      );
+    });
   }
 
-  if (urlInput && !urlInput.placeholder) {
+  const urlInput = $('url');
+
+  if (urlInput) {
+    if (urlInput.value && urlInput.value.includes('langleywellington')) {
+      urlInput.value = '';
+    }
+
     urlInput.placeholder = 'Enter website URL, e.g. https://example.com';
   }
 
-  const maxPages = $('maxPages');
-  if (maxPages && (!maxPages.value || maxPages.value === '100')) {
-    maxPages.value = '1000';
+  const maxPagesInput = $('maxPages');
+
+  if (maxPagesInput) {
+    if (!maxPagesInput.value || maxPagesInput.value === '100') {
+      maxPagesInput.value = '1000';
+    }
+
+    maxPagesInput.min = '1';
+    maxPagesInput.max = '10000';
   }
 
   setStatus('');
