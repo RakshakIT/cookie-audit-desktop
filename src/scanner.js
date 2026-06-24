@@ -44,7 +44,7 @@ function resourceKey(item) {
 function isAssetUrl(url) {
   try {
     const pathname = new URL(url).pathname;
-    return /\.(pdf|jpg|jpeg|png|gif|webp|svg|zip|docx?|xlsx?|pptx?|mp4|mp3|css|js|ico|woff2?|ttf)$/i.test(pathname);
+    return /\.(pdf|jpg|jpeg|png|gif|webp|svg|zip|docx?|xlsx?|pptx?|mp4|mp3|ico|woff2?|ttf)$/i.test(pathname);
   } catch {
     return true;
   }
@@ -60,6 +60,9 @@ function guessProvider(url) {
   if (host.includes('cookieyes')) return 'CookieYes';
   if (host.includes('moneypenny')) return 'Moneypenny';
   if (host.includes('yoshki')) return 'Yoshki / SRA Digital Badge';
+  if (host.includes('trustpilot')) return 'Trustpilot';
+  if (host.includes('blockmarktech')) return 'BlockMark Registry';
+  if (host.includes('regulationandcomplianceoffice')) return 'Regulation and Compliance Office';
   if (host.includes('facebook') || host.includes('connect.facebook')) return 'Meta / Facebook';
   if (host.includes('linkedin')) return 'LinkedIn';
   if (host.includes('hotjar')) return 'Hotjar';
@@ -87,15 +90,13 @@ async function collectLinks(page, rootHost) {
 }
 
 async function collectPageResources(page, currentUrl, rootHost) {
-  const resources = [];
-
   const data = await page.evaluate(() => {
-    const scripts = Array.from(document.querySelectorAll('script[src]')).map(el => el.src);
-    const iframes = Array.from(document.querySelectorAll('iframe[src]')).map(el => el.src);
-    const images = Array.from(document.querySelectorAll('img[src]')).map(el => el.src);
-    const links = Array.from(document.querySelectorAll('link[href]')).map(el => el.href);
-
-    return { scripts, iframes, images, links };
+    return {
+      scripts: Array.from(document.querySelectorAll('script[src]')).map(el => el.src),
+      iframes: Array.from(document.querySelectorAll('iframe[src]')).map(el => el.src),
+      images: Array.from(document.querySelectorAll('img[src]')).map(el => el.src),
+      links: Array.from(document.querySelectorAll('link[href]')).map(el => el.href)
+    };
   }).catch(() => ({
     scripts: [],
     iframes: [],
@@ -103,19 +104,19 @@ async function collectPageResources(page, currentUrl, rootHost) {
     links: []
   }));
 
+  const resources = [];
+
   for (const [type, urls] of Object.entries(data)) {
     for (const url of urls) {
       const cleaned = cleanUrl(url);
       if (!cleaned) continue;
-
-      const thirdParty = !sameSite(cleaned, rootHost);
 
       resources.push({
         type,
         url: cleaned,
         domain: getHost(cleaned),
         provider: guessProvider(cleaned),
-        thirdParty,
+        thirdParty: !sameSite(cleaned, rootHost),
         detectedOn: currentUrl
       });
     }
@@ -176,24 +177,9 @@ async function collectSitemapUrls(request, rootUrl, rootHost, maxPages) {
 async function handleConsent(page, mode) {
   if (mode === 'none') return;
 
-  const acceptPatterns = [
-    'accept all',
-    'accept',
-    'agree',
-    'allow all',
-    'ok',
-    'got it'
-  ];
-
-  const rejectPatterns = [
-    'reject all',
-    'reject',
-    'decline',
-    'deny',
-    'necessary only'
-  ];
-
-  const patterns = mode === 'accept' ? acceptPatterns : rejectPatterns;
+  const patterns = mode === 'accept'
+    ? ['accept all', 'accept', 'agree', 'allow all', 'ok', 'got it']
+    : ['reject all', 'reject', 'decline', 'deny', 'necessary only'];
 
   for (const text of patterns) {
     try {
@@ -207,6 +193,29 @@ async function handleConsent(page, mode) {
   }
 }
 
+async function triggerLazyLoadedServices(page) {
+  await page.waitForTimeout(3000);
+
+  await page.evaluate(async () => {
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+    window.scrollTo(0, 0);
+    await wait(500);
+
+    window.scrollTo(0, Math.floor(document.body.scrollHeight / 3));
+    await wait(1000);
+
+    window.scrollTo(0, Math.floor(document.body.scrollHeight / 2));
+    await wait(1000);
+
+    window.scrollTo(0, document.body.scrollHeight);
+    await wait(2500);
+
+    window.scrollTo(0, 0);
+    await wait(800);
+  }).catch(() => {});
+}
+
 async function launchBrowser() {
   return chromium.launch({
     channel: 'chrome',
@@ -216,21 +225,16 @@ async function launchBrowser() {
 
 async function scanWebsite(options, onProgress = () => {}) {
   const startUrl = normaliseUrl(options.url);
-
-  // Increased from 1000 to 10000.
-  // Still limited to stop accidental endless crawling.
   const maxPages = Math.max(1, Math.min(Number(options.maxPages || 1000), 10000));
-
   const consentMode = options.consentMode || 'none';
+
   const root = new URL(startUrl);
   const rootHost = root.hostname.replace(/^www\./, '').toLowerCase();
   const startedAt = new Date().toISOString();
 
   const browser = await launchBrowser();
-
-  const context = await browser.newContext({
-    ignoreHTTPSErrors: true
-  });
+  const context = await browser.newContext({ ignoreHTTPSErrors: true });
+  const page = await context.newPage();
 
   const cookieMap = new Map();
   const resourceMap = new Map();
@@ -241,12 +245,9 @@ async function scanWebsite(options, onProgress = () => {}) {
   const queue = [startUrl];
   const seen = new Set();
 
-  const page = await context.newPage();
-
   page.on('request', request => {
     try {
-      const url = request.url();
-      const cleaned = cleanUrl(url);
+      const cleaned = cleanUrl(request.url());
       if (!cleaned) return;
 
       const item = {
@@ -263,20 +264,13 @@ async function scanWebsite(options, onProgress = () => {}) {
   });
 
   try {
-    const sitemapUrls = await collectSitemapUrls(
-      context.request,
-      startUrl,
-      rootHost,
-      maxPages
-    );
-
+    const sitemapUrls = await collectSitemapUrls(context.request, startUrl, rootHost, maxPages);
     for (const u of sitemapUrls) {
       if (!queue.includes(u)) queue.push(u);
     }
 
     while (queue.length && pages.length < maxPages) {
       const currentUrl = queue.shift();
-
       if (!currentUrl || seen.has(currentUrl)) continue;
 
       seen.add(currentUrl);
@@ -305,7 +299,8 @@ async function scanWebsite(options, onProgress = () => {}) {
 
         await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
         await handleConsent(page, consentMode);
-        await page.waitForTimeout(1500);
+        await triggerLazyLoadedServices(page);
+        await page.waitForTimeout(5000);
 
         const cookies = await context.cookies();
         let pageCookieCount = 0;
@@ -380,11 +375,7 @@ async function scanWebsite(options, onProgress = () => {}) {
       } catch (error) {
         pageRecord.status = 'error';
         pageRecord.error = error.message;
-
-        errors.push({
-          url: currentUrl,
-          error: error.message
-        });
+        errors.push({ url: currentUrl, error: error.message });
       }
 
       pages.push(pageRecord);
@@ -428,6 +419,7 @@ async function scanWebsite(options, onProgress = () => {}) {
         cookiesFound: 0,
         scriptsFound: 0,
         iframesFound: 0,
+        imagesFound: 0,
         networkRequestsFound: 0,
         pagesDetected: []
       });
@@ -453,26 +445,21 @@ async function scanWebsite(options, onProgress = () => {}) {
   }
 
   for (const resource of thirdPartyResources) {
-    const provider = resource.provider;
-    const service = thirdPartyServicesMap.get(provider);
+    const service = thirdPartyServicesMap.get(resource.provider);
+    if (!service) continue;
 
-    if (service) {
-      if (resource.type === 'scripts') service.scriptsFound += 1;
-      if (resource.type === 'iframes') service.iframesFound += 1;
+    if (resource.type === 'scripts') service.scriptsFound += 1;
+    if (resource.type === 'iframes') service.iframesFound += 1;
+    if (resource.type === 'images') service.imagesFound += 1;
 
-      for (const p of resource.pagesDetected || []) {
-        if (!service.pagesDetected.includes(p)) service.pagesDetected.push(p);
-      }
+    for (const p of resource.pagesDetected || []) {
+      if (!service.pagesDetected.includes(p)) service.pagesDetected.push(p);
     }
   }
 
   for (const request of thirdPartyNetworkRequests) {
-    const provider = request.provider;
-    const service = thirdPartyServicesMap.get(provider);
-
-    if (service) {
-      service.networkRequestsFound += 1;
-    }
+    const service = thirdPartyServicesMap.get(request.provider);
+    if (service) service.networkRequestsFound += 1;
   }
 
   const categoryCounts = cookies.reduce((acc, c) => {
