@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cookie Audit Scanner</title>
+  <link rel="stylesheet" href="renderer.css" />
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div>
+        <h1>Cookie Audit Scanner</h1>
+        <p>Desktop full-site cookie scanner using Chromium automation.</p>
+      </div>
+    </header>
+
+    <section class="panel controls">
+      <label>
+        Website URL
+        <input id="url" value="https://langleywellington.co.uk" />
+      </label>
+      <label>
+        Max pages
+        <input id="maxPages" type="number" min="1" max="1000" value="100" />
+      </label>
+      <label>
+        Consent mode
+        <select id="consentMode">
+          <option value="none">No action</option>
+          <option value="accept">Accept</option>
+          <option value="reject">Reject</option>
+        </select>
+      </label>
+      <button id="scanBtn">Run full-site scan</button>
+    </section>
+
+    <section class="status" id="status">Ready.</section>
+
+    <section class="cards" id="summaryCards"></section>
+
+    <section class="panel actions hidden" id="actions">
+      <button id="jsonBtn">Export JSON</button>
+      <button id="csvBtn">Export CSV</button>
+    </section>
+
+    <section class="panel hidden" id="categoryPanel">
+      <h2>Categories</h2>
+      <div class="category-grid" id="categories"></div>
+    </section>
+
+    <section class="panel hidden" id="pagesPanel">
+      <h2>Pages scanned</h2>
+      <div class="table-wrap"><table id="pagesTable"></table></div>
+    </section>
+
+    <section class="panel hidden" id="cookiesPanel">
+      <h2>Cookies</h2>
+      <div class="table-wrap"><table id="cookiesTable"></table></div>
+    </section>
+  </main>
+  <script src="renderer.js"></script>
+</body>
+</html>

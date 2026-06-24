@@ -1,0 +1,39 @@
+{
+  "name": "cookie-audit-desktop",
+  "version": "1.0.0",
+  "description": "Desktop cookie audit scanner using Electron and Playwright",
+  "main": "src/main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "postinstall": "playwright install chromium",
+    "build:win": "electron-builder --win nsis",
+    "build:mac": "electron-builder --mac dmg",
+    "build:linux": "electron-builder --linux AppImage"
+  },
+  "dependencies": {
+    "@playwright/test": "^1.48.2",
+    "electron": "^33.2.1"
+  },
+  "devDependencies": {
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "uk.co.firetap.cookieauditscanner",
+    "productName": "Cookie Audit Scanner",
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/playwright-core/.local-browsers",
+        "to": "playwright-browsers",
+        "filter": ["**/*"]
+      }
+    ],
+    "directories": {
+      "output": "dist"
+    }
+  }
+}
